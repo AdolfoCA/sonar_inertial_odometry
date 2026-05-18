@@ -48,8 +48,9 @@ RUN apt update -q \
     ros-humble-foxglove-bridge \
     ros-humble-perception-pcl \
     pybind11-dev \
+    ros-humble-rmw-fastrtps-cpp \
+    ros-humble-imu-tools \
     && apt clean \
-    apt install ros-humble-foxglove-bridge \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Install Python dependencies (requirements.txt + explicit packages from second Dockerfile)
@@ -87,8 +88,6 @@ WORKDIR /home/$USERNAME/ros2_ws
 RUN /bin/bash -c "source /opt/ros/$ROS_DISTRO/setup.bash && colcon build --symlink-install"
 RUN /bin/bash -c "source /opt/ros/$ROS_DISTRO/setup.bash && source /home/$USERNAME/ros2_ws/install/setup.bash && rosdep update && rosdep install --from-paths src --ignore-src -r -y && colcon build --symlink-install"
 
-# Copy middleware profile
-RUN sudo mkdir -p /usr/local/share/middleware_profiles/
-COPY rtps_udp_profile.xml /usr/local/share/middleware_profiles/
+ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 
 CMD ["bash"]

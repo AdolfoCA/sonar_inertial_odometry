@@ -4,8 +4,8 @@ imu_filter_madgwick_node:
     use_mag: false                # no magnetometer on this vehicle
     publish_tf: false             # TF is handled by sonar_odometry_node
     publish_debug_topics: false
-    world_frame: "ned"            # output orientation in NED frame
-    gain: 0.1                     # Madgwick beta gain (higher = faster convergence, more noise)
+    world_frame: "enu"            # FLU sensor (gravity +Z body) → ENU world (gravity -Z world)
+    gain: 0.1                    # Madgwick beta gain (higher = faster convergence, more noise)
     zeta: 0.0                     # gyro drift compensation gain (0 = disabled)
     orientation_stddev: 0.0       # added to orientation covariance diagonal
     constant_dt: 0.0              # 0 = use message timestamps
@@ -14,64 +14,103 @@ sonar_odometry_node:
   ros__parameters:
     # ── Topics ─────────────────────────────────────────────────────────────
     imu_topic: "/imu/data"                      # filtered IMU output from Madgwick node
-    sonar_topic: "/oculus/sonar_image"          # sensor_msgs/Image (polar sonar frame)
-    odom_topic: "/odometry"                     # nav_msgs/Odometry (output)
+    sonar_topic: "/oculus/sonar_image"       # sensor_msgs/Image (polar sonar frame)
+    odom_topic: "/sonar/odometry"               # nav_msgs/Odometry (output)
     odom_frame_id: "odom"
-    base_frame_id: "base_link"
+    base_frame_id: "base_link"    # FLU body frame; Fast-LIO publishes odom → base_link
 
     # ── Sensor TF frames ───────────────────────────────────────────────────
     # The node looks up the static TF from each sensor frame to base_frame_id
     # and uses it to rotate measurements into the FRD body frame.
     # Publish these transforms with a static_transform_publisher or robot_state_publisher.
-    imu_frame_id:   "imu"
-    sonar_frame_id: "oculus"
+    imu_frame_id:   "os_imu"
+    sonar_frame_id: "oculus_sonar"
 
 
     # ── Initial conditions ─────────────────────────────────────────────────
-    # Set initial_heading_deg to the vehicle's true heading at startup
-    # (e.g. read from compass/GPS bearing before launch).
-    initial_heading_deg: 96.15            # degrees, 0 = North, positive = East
+    # 0.0 = no rotation from startup pose (odom +X = vehicle-forward at t=0)
+    # Matches Fast-LIO local odom convention. Only change if you know the
+    # vehicle's starting angle relative to the desired odom X axis.
+    initial_heading_deg: 0.0
 
     # IMU calibration (from IMU_extraction.py / IMU_calculation_biases.py)
-    accel_bias_x: -0.2621541              # m/s^2
-    accel_bias_y:  0.16079578            # m/s^2
-    gyro_bias_z:   0.002                  # rad/s
+    accel_bias_x:  0.            # m/s^2
+    accel_bias_y:  0.            # m/s^2
+    gyro_bias_z:   0.                  # rad/s
 
-    # ── IMU noise (IAM-20680HT datasheet) ──────────────────────────────────
-    n_accel_ug_sqrthz: 135.0             # µg/√Hz
-    n_gyro_dps_sqrthz: 0.005             # dps/√Hz
+    # ── Q: IMU white-noise variances ───────────────────────────────────────
+    # acc: (135e-6 g/√Hz × 9.81 m/s²/g)² = 1.754e-6  (m/s²)²/Hz
+    # gyro: (0.005 deg/s/√Hz × π/180)²   = 7.615e-9  (rad/s)²/Hz
+    acc_covariance:    1.754e-6  # (m/s²)²   — forward & lateral accel noise variance
+    gyro_covariance:   7.615e-9  # (rad/s)²  — yaw-rate noise variance
 
-    # ── Sonar measurement noise ────────────────────────────────────────────
-    sigma_sonar_pos:     0.023464        # metres  (sqrt(0.00055))
-    sigma_sonar_heading: 0.023464        # radians
+    # ── Q: bias / scale random-walk variances ──────────────────────────────
+    # b_acc:  q_sigma_b_accel²  = 0.5²   = 0.25
+    # b_gyro: q_sigma_b_gyro²   = 0.5²   = 0.25
+    # scale:  q_sigma_scale²    = 0.001² = 1.0e-6
+    b_acc_covariance:  0.25          # (m/s²)²   — accel bias random-walk variance
+    b_gyro_covariance: 0.25          # (rad/s)²  — gyro  bias random-walk variance
+    scale_covariance:  1.0e-6        # dimensionless² — scale factor random-walk variance
 
-    # ── Sonar scale calibration ────────────────────────────────────────────
-    # Empirical scale factors matching the notebook (beta / gamma).
-    # Tune these on a straight-line calibration run.
-    sonar_scale_forward: 1.3   # increased from 1.3 — sonar was underestimating displacement ~2.3×
-    sonar_scale_right:   1.3   # same correction applied laterally
-    sonar_scale_heading: 1.4
+    # ── R: sonar measurement noise variances ───────────────────────────────
+    # r_sigma_sonar² = 0.023464² = 5.506e-4
+    sonar_position_covariance: 8.506e-4  # m²    — forward & lateral position variance
+    sonar_yaw_covariance:      8.506e-4  # rad²  — heading change variance
+    
+    # Use this for the zigzag 
+    #sonar_position_covariance: 2.506e-4  # m²    — forward & lateral position variance
+    #sonar_yaw_covariance:      2.506e-4  # rad²  — heading change variance
 
-    # ── GPS heading initialisation ─────────────────────────────────────────
-    # On startup the node listens to /fix and waits until the vehicle has
-    # moved gps_heading_min_dist_m metres, then computes the GPS bearing and
-    # resets the EKF heading to that value (overriding initial_heading_deg).
-    # Set use_gps_initial_heading: false to use initial_heading_deg instead.
-    use_gps_initial_heading: true
-    gps_heading_min_dist_m:  2.0   # metres of GPS displacement required
-
-    # ── Image processing pipeline (Bilateral → CLAHE) ──────────────────────
+    # ── Image processing pipeline (crop → normalize → bilateral → CLAHE) ────
+    crop_row:              200    # rows above this are water column and discarded
     bilateral_d:           9      # pixel neighbourhood diameter
-    bilateral_sigma_color: 75.0   # colour-space sigma (higher = more colour mixing)
-    bilateral_sigma_space: 75.0   # spatial sigma (higher = farther pixels influence each other)
-    clahe_clip_limit:      3.0    # contrast limit (higher = stronger enhancement, more noise)
+    bilateral_sigma_color: 50.0   # colour-space sigma
+    bilateral_sigma_space: 50.0   # spatial sigma
+    clahe_clip_limit:      2.0    # contrast limit
     clahe_tile_grid_size:  8      # CLAHE tile grid (NxN tiles)
 
+    # ── Feature matching ───────────────────────────────────────────────────
+    lowe_ratio:               0.70   # Lowe's ratio test threshold (lower = stricter)
+    use_pixel_ransac:         true    # true = pixel RANSAC (Stage 1) before Cartesian LMEDS
+                                     # false = Cartesian LMEDS only (all Lowe matches passed directly)
+    pixel_ransac_threshold:   6.0    # Stage-1 pixel-space RANSAC inlier threshold (pixels)
+                                     # only used when use_pixel_ransac: true
+                                     # Too large → accepts false matches → inflated path
+                                     # Too small → rejects real matches → compressed path
+    distance_threshold:       0.3    # Stage-2 Cartesian LMEDS threshold (metres)
+
     # ── EKF tuning ─────────────────────────────────────────────────────────
-    lowe_ratio:       0.50               # Lowe's ratio test threshold (lower = stricter matches)
     nis_threshold:    30.0               # NIS gating threshold (chi2, dof=3 → 99th pct ≈ 11.3)
     min_inliers:      6
     min_inlier_ratio: 0.3
 
+    # ── Debug ──────────────────────────────────────────────────────────────
+    debug: false                    # save match visualization images
+    debug_match_interval: 10         # save a match image every N sonar scans
+
     # ── TF broadcast ───────────────────────────────────────────────────────
-    publish_tf: false                    # set true to broadcast odom→base_link TF
+    publish_tf: false                # TF tree is owned by Fast-LIO (odom → os_imu)
+
+gps_path_node:
+  ros__parameters:
+    fix_topic:  "/fix"        # sensor_msgs/NavSatFix input
+    path_topic: "/gps/path"   # nav_msgs/Path output (add in RViz to compare with odometry paths)
+    frame_id:   "odom"        # must match odom_frame_id above
+
+lidar_path_logger_node:
+  ros__parameters:
+    lidar_odom_topic: "/odometry"   # Fast-LIO publishes here (node name: lio_mapping)
+    csv_data_dir: ""                # empty = <ws_root>/debug/data
+
+imu_dr_node:
+  ros__parameters:
+    raw_imu_topic:       "/ouster/imu"
+    filt_imu_topic:      "/imu/data"
+    odom_frame_id:       "odom"
+    imu_frame_id:        "os_imu"      # must match sonar_odometry_node
+    base_frame_id:       "base_link"   # must match sonar_odometry_node
+    initial_heading_deg:  0.0
+    # accel_bias_x/y and gyro_bias_z are in FLU body frame (same convention as sonar_odometry_node)
+    accel_bias_x:        0.0
+    accel_bias_y:        0.0
+    gyro_bias_z:         0.0

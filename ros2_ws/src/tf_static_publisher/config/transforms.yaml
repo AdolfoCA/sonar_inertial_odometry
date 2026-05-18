@@ -1,93 +1,62 @@
 # =============================================================================
 # transforms.yaml
-# Date: 2024-04-08
-# Sonar Configuration: 1 (forward-facing, 30 deg pitch, 0 deg roll)
 #
-# Tree structure:
-#   odom → os_imu          (dynamic, published by FastLIO2)
-#   os_imu → os_sensor     (static)
-#   os_sensor → os_lidar   (static)
-#   os_imu → base_link     (static — bridge to robot body frames)
-#   base_link → otter → otter_frd → sonar_joint1 → sonar_joint2 → sonar
-#   base_link → imu
+# Conventions:
+#   os_imu: BRU (backward, R=right, U=up)
+#   base_link: FLU  (X=forward, Y=left, Z=up) 
+
+#                    tune rotation here once CCW/CW direction is confirmed
+#   oculus_sonar: Z=boresight, Y=port/left, X=out of plane
+#
+# Geometry:
+#   sonar position wrt IMU:
+#     x = -0.40 m   (40 cm behind)
+#     y =  0.00 m
+#     z = -1.20 m   (120 cm below, IMU Z is up)
+#   sonar boresight: 30° downward in forward direction
 # =============================================================================
 
 transforms:
-
-  # --- os_imu to base_link (bridge to robot body) ---------------------------
-  # os_sensor is at base_link with 180 deg yaw rotation
-  # Combined: os_imu offset + inverse of os_sensor→base_link rotation
-  - frame_id: imu
-    child_frame_id: base_link
-    invert: false
-    translation:
-      x: 0.26
-      y: 0.0
-      z: -0.53
-    rotation:
-      x: 0.0
-      y: 0.0
-      z: 0.0
-
-  # --- Robot hull -----------------------------------------------------------
+  # base_link → os_imu: 180° rotation around Z (inverted from os_imu→base_link)
   - frame_id: base_link
-    child_frame_id: otter
-    invert: false
-    translation:
-      x: -0.26
-      y: 0.0
-      z: 0.0
-    rotation:
-      x: 0.0
-      y: 0.0
-      z: 0.0
-
-  - frame_id: otter
-    child_frame_id: otter_frd
-    invert: true
-    translation:
-      x: 0.0
-      y: 0.0
-      z: 0.41
-    rotation:
-      x: 180.0   # Z axis pointing downwards
-      y: 0.0
-      z: 0.0
-
-  # --- Sonar mount chain ---------------------------------------------------
-  - frame_id: otter_frd
-    child_frame_id: sonar_joint1
+    child_frame_id: os_imu
     invert: false
     translation:
       x: 0.0
       y: 0.0
-      z: 1.24
+      z: 0.0
     rotation:
       x: 0.0
-      y: -30.0   # pitch of sonar head
-      z: 0.0
+      y: 0.0
+      z: 180.0  
 
-  - frame_id: sonar_joint1
-    child_frame_id: sonar_joint2
+  # base_link → os_lidar: same 180° Z rotation as os_imu, small lever-arm offset
+  # Translation is the os_lidar→os_imu extrinsic_T negated and rotated into base_link frame.
+  # extrinsic_T (lidar wrt imu) = [-0.006253, 0.011775, 0.028535]; 180° Z flip negates x,y.
+  - frame_id: base_link
+    child_frame_id: os_lidar
     invert: false
     translation:
-      x: 0.0
-      y: 0.0
-      z: 0.04
+      x:  0.006253   #  -(-0.006253) rotated by 180° Z
+      y: -0.011775   #  -(0.011775)  rotated by 180° Z
+      z:  0.028535
     rotation:
       x: 0.0
       y: 0.0
-      z: 0.0
+      z: 180.0
 
-  - frame_id: sonar_joint2
-    child_frame_id: oculus
+  # base_link → oculus_sonar: position + 30° depression forward
+  # Ry(120°) in FLU body frame tilts the boresight (+Z_sonar) to [cos30°, 0, -sin30°]
+  # = forward-down at 30° depression.  No yaw needed — parent is already FLU base_link.
+  - frame_id: base_link
+    child_frame_id: oculus_sonar
     invert: false
     translation:
-      x: 0.1
+      x: -0.40
       y: 0.0
-      z: 0.12
+      z: -1.20
     rotation:
       x: 0.0
-      y: 0.0
+      y: 120  # degrees; tilts boresight 30° below horizontal forward
       z: 0.0
 

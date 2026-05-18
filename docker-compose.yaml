@@ -12,7 +12,7 @@ services:
       - USERNAME=rosdev
       - GID=1000
       - UID=1000
-      - "FASTRTPS_DEFAULT_PROFILES_FILE=/usr/local/share/middleware_profiles/rtps_udp_profile.xml"
+      - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
       - DISPLAY=:0
       - XDG_RUNTIME_DIR=/tmp/runtime-rosdev
       - QT_X11_NO_MITSHM=1
@@ -27,10 +27,6 @@ services:
       - /dev/*:/dev/*
       # Workspace sources (bind mount for live editing)
       - ./ros2_ws/src:/home/rosdev/ros2_ws/src:cached
-      # Named volumes for build caches
-      - ros_build:/home/rosdev/ros2_ws/build
-      - ros_install:/home/rosdev/ros2_ws/install
-      - ros_log:/home/rosdev/ros2_ws/log
     network_mode: "host"
     dns:
       - 1.1.1.1
@@ -41,8 +37,3 @@ services:
     privileged: true
     restart: always
     command: /bin/bash -c "source /home/rosdev/ros2_ws/install/setup.bash && bash"
-
-volumes:
-  ros_build:
-  ros_install:
-  ros_log:

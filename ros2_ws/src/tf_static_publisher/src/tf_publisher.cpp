@@ -66,7 +66,8 @@ private:
   {
     for (auto &tf : transforms_)
     {
-      tf.header.stamp = this->now();
+      tf.header.stamp.sec = 0;
+      tf.header.stamp.nanosec = 0;
       tf_static_broadcaster_->sendTransform(tf);
     }
   }

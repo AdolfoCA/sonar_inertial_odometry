@@ -6,14 +6,29 @@ import cv2
 
 class SonarFeatureMatcher:
 
-    def __init__(self, lowe_ratio: float = 0.50):
+    def __init__(self, lowe_ratio: float = 0.75, distance_threshold: float = 0.5,
+                 crop_row: int = 0, pixel_ransac_threshold: float = 3.0,
+                 use_pixel_ransac: bool = True):
         """
         Parameters
         ----------
-        lowe_ratio : Lowe's ratio-test threshold for match filtering.
-                     Lower values = stricter (fewer but more reliable matches).
+        lowe_ratio             : Lowe's ratio-test threshold for match filtering.
+        distance_threshold     : Stage-2 Cartesian LMEDS threshold (metres).
+        crop_row               : Rows cropped from the top before feature detection.
+        pixel_ransac_threshold : Stage-1 pixel-space RANSAC inlier threshold (pixels).
+                                 Controls how far a match is allowed to deviate from the
+                                 consensus translation in image (col, row) space.
+                                 Too large → accepts false matches → inflated path.
+                                 Too small → rejects real matches → compressed or noisy path.
+        use_pixel_ransac       : If True (default), run Stage-1 pixel RANSAC before the
+                                 Cartesian LMEDS. If False, all Lowe-ratio matches are
+                                 passed directly to the Cartesian LMEDS (Stage 2 only).
         """
-        self._lowe_ratio = lowe_ratio
+        self._lowe_ratio             = lowe_ratio
+        self._distance_threshold     = distance_threshold
+        self._crop_row               = crop_row
+        self._pixel_ransac_threshold = pixel_ransac_threshold
+        self._use_pixel_ransac       = use_pixel_ransac
         # Sonar geometry — populated from the first ROS message via update_sonar_params()
         self._beam_azimuths_rad: np.ndarray | None = None   # shape (beam_count,)
         self._ranges_m: np.ndarray | None = None             # shape (range_bins,)
@@ -126,76 +141,112 @@ class SonarFeatureMatcher:
     
     def estimate_transformation(self, kp1, kp2, matches):
         """
-        Estimate transformation between matched keypoints.
+        Estimate transformation between matched keypoints using a two-stage pipeline.
+
+        Stage 1 — Pixel-space RANSAC
+        ─────────────────────────────
+        RANSAC runs on raw (col, row) image coordinates.
+
+        Why pixel space first: for a wide-FOV forward-looking sonar, pure forward
+        surge shifts scatterers by d·cos(θ)/range_per_bin rows. cos(θ) varies from
+        1.0 at boresight to ~0.42 at ±65°, so the row shift is not perfectly uniform
+        — but it is far more uniform than in Cartesian space, where the same surge
+        appears as a cos²(θ)-weighted x-shift that looks like a mix of translation
+        and distortion to a Cartesian RANSAC. Single-stage Cartesian RANSAC on a
+        wide-FOV sonar tends to fit different consensus groups frame-to-frame,
+        causing forward/backward sign flips.
+
+        Pixel RANSAC finds a stable inlier set in the space where the dominant
+        (forward) motion has the strongest and most consistent signal.
+
+        Threshold tuning: pixel_ransac_threshold ≈ 2× expected per-frame boresight
+        row shift. See __init__ docstring for the formula and per-speed examples.
+
+        Stage 2 — Cartesian LMEDS on pixel inliers
+        ────────────────────────────────────────────
+        The pixel-inlier subset is converted to Cartesian metres and a second
+        robust fit (LMEDS) extracts the physical translation and heading change.
+        No second RANSAC is needed because outliers are already removed.
+
+        Returns
+        -------
+        dict with keys:
+          transformation         : 2×3 Cartesian affine (T_scene: pts2 = T·pts1) or None
+          transformation_pixel   : 2×3 pixel affine (T_scene in image coords) or None
+          inliers                : bool mask over `matches`
+          num_inliers            : int
+          inlier_ratio           : float
         """
+        _empty = {
+            "transformation":       None,
+            "transformation_pixel": None,
+            "inliers":              None,
+            "num_inliers":          0,
+            "inlier_ratio":         0.0,
+        }
         if len(matches) < 4:
-            return {
-                "transformation": None,
-                "inliers": None,
-                "num_inliers": 0,
-                "inlier_ratio": 0.0
-            }
-        
-        # Extract matched points (these are in polar image coordinates)
+            return _empty
+
         pts1_polar = np.float32([kp1[m.queryIdx].pt for m in matches])
         pts2_polar = np.float32([kp2[m.trainIdx].pt for m in matches])
-        
-        # Convert to Cartesian coordinates
-        pts1_cart = np.float32([
-            self.polar_to_cartesian_coords(col, row) 
-            for (col, row) in pts1_polar
-        ])
-        pts2_cart = np.float32([
-            self.polar_to_cartesian_coords(col, row) 
-            for (col, row) in pts2_polar
-        ])
-        
-        # Use meter-based threshold for Cartesian coordinates
-        #TODO: I also want to set this threshold in the config file.
-        ranges = np.linalg.norm(pts1_cart, axis=1)
-        #reproj_threshold_m = max(0.05, np.median(ranges) * 0.03)  # 3% of median range
-        #print (f"Reprojection threshold (m): {reproj_threshold_m}")
-        #reproj_threshold_m = 0.1 # 1 meter
-        reproj_threshold_m = 0.5 # 2 meters
-        
-        # Estimate transformation in Cartesian space
-        # I2 = T * I1
-        transformation_image, inliers = cv2.estimateAffinePartial2D( # from image 1 to image 2 
-            pts1_cart, pts2_cart,
-            method=cv2.RANSAC,
-            ransacReprojThreshold=reproj_threshold_m,
-            maxIters=5000,
-            confidence=0.99,
-            refineIters=200
-        )
-        # from S1 to S2 
-        #transformation = transformation_image
-        transformation = cv2.invertAffineTransform(transformation_image)
-        if transformation is not None:
-            # Extract and normalize rotation matrix
-            rotation_matrix = transformation[:2, :2]
-            translation = transformation[:2, 2]
-                     
-            # Force unit scale
-            u, s, vt = np.linalg.svd(rotation_matrix)
-            transformation[:2, :2] = u @ vt
 
-        if transformation is None or inliers is None:
-            return {
-                "transformation": None,
-                "inliers": None,
-                "num_inliers": 0,
-                "inlier_ratio": 0.0
-            }
-        
-        num_inliers = int(np.sum(inliers))
-        inlier_ratio = num_inliers / len(matches)
-        
+        # ── Stage 1: pixel-space RANSAC (optional) ────────────────────────────
+        if self._use_pixel_ransac:
+            T_pixel, inliers_px = cv2.estimateAffinePartial2D(
+                pts1_polar, pts2_polar,
+                method=cv2.RANSAC,
+                ransacReprojThreshold=self._pixel_ransac_threshold,
+                maxIters=5000,
+                confidence=0.99,
+                refineIters=200,
+            )
+            if T_pixel is None or inliers_px is None:
+                return _empty
+
+            u, s, vt = np.linalg.svd(T_pixel[:2, :2])
+            T_pixel[:2, :2] = u @ vt
+
+            inlier_mask  = inliers_px.ravel().astype(bool)
+            num_inliers  = int(inlier_mask.sum())
+            inlier_ratio = num_inliers / len(matches)
+        else:
+            # Skip pixel RANSAC: pass all Lowe-ratio matches to Cartesian LMEDS
+            T_pixel      = None
+            inlier_mask  = np.ones(len(matches), dtype=bool)
+            num_inliers  = len(matches)
+            inlier_ratio = 1.0
+
+        # ── Stage 2: Cartesian LMEDS on pixel inliers ────────────────────────
+        # Row coordinates come from the cropped image — add _crop_row to recover
+        # the original range-bin index before interpolating into ranges_m.
+        T_cart: np.ndarray | None = None
+        if num_inliers >= 4:
+            pts1_cart = np.float32([
+                self.polar_to_cartesian_coords(col, row + self._crop_row)
+                for col, row in pts1_polar[inlier_mask]
+            ])
+            pts2_cart = np.float32([
+                self.polar_to_cartesian_coords(col, row + self._crop_row)
+                for col, row in pts2_polar[inlier_mask]
+            ])
+            T_cart, _ = cv2.estimateAffinePartial2D(
+                pts1_cart, pts2_cart,
+                method=cv2.LMEDS,
+                ransacReprojThreshold=self._distance_threshold,
+                maxIters=2000,
+                confidence=0.99,
+                refineIters=100,
+            )
+            if T_cart is not None:
+                u, s, vt = np.linalg.svd(T_cart[:2, :2])
+                T_cart[:2, :2] = u @ vt
+
         return {
-            "transformation": transformation,
-            "inliers": inliers.ravel().astype(bool),
-            "num_inliers": num_inliers,
-            "inlier_ratio": inlier_ratio
+            "transformation":       T_cart,
+            "transformation_pixel": T_pixel,
+            "inliers":              inlier_mask,
+            "num_inliers":          num_inliers,
+            "inlier_ratio":         inlier_ratio,
         }
     
 

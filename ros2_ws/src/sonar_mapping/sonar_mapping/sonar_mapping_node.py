@@ -50,7 +50,7 @@ from marine_acoustic_msgs.msg import ProjectedSonarImage
 
 from sonar_odometry.image_processing import SonarImageProcessor
 from sonar_mapping.leading_edge_core import (
-    make_detector, scan_to_map_points,
+    make_detector, scan_to_map_points_strict,
 )
 
 
@@ -97,6 +97,12 @@ class SonarMappingNode(Node):
         self.declare_parameter('akaze_octaves', 8)
         self.declare_parameter('akaze_octave_layers', 8)
         self.declare_parameter('map_publish_every', 20)
+        # strict leading-edge gates (see leading_edge_core.strict_leading_edge)
+        self.declare_parameter('min_response', 0.0013)
+        self.declare_parameter('min_intensity', 40)
+        self.declare_parameter('consistency_window', 15)
+        self.declare_parameter('consistency_tol_bins', 30)
+        self.declare_parameter('min_beams', 8)
         self.declare_parameter('save_path', os.path.expanduser('~/sonar_mapping_map.ply'))
 
         g = lambda n: self.get_parameter(n).value
@@ -105,6 +111,11 @@ class SonarMappingNode(Node):
         self.map_frame = g('map_frame')
         self.map_publish_every = int(g('map_publish_every'))
         self.save_path = os.path.expanduser(g('save_path'))
+        self.strict = dict(min_response=float(g('min_response')),
+                           min_intensity=int(g('min_intensity')),
+                           window=int(g('consistency_window')),
+                           tol_bins=int(g('consistency_tol_bins')),
+                           min_beams=int(g('min_beams')))
 
         self.processor = SonarImageProcessor()
         self.processor.config['crop_row'] = self.crop_row
@@ -147,8 +158,9 @@ class SonarMappingNode(Node):
         processed = self.processor.process_image(img)
         raw_crop = img[self.crop_row:, :]
         north, east, yaw = self._pose
-        pts = scan_to_map_points(processed, raw_crop, self.detector, az, rng,
-                                 self.crop_row, self.pitch, north, east, yaw)
+        pts = scan_to_map_points_strict(processed, raw_crop, self.detector, az, rng,
+                                        self.crop_row, self.pitch, north, east, yaw,
+                                        **self.strict)
         self._n_scans += 1
         if len(pts) == 0:
             return

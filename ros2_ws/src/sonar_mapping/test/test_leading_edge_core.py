@@ -129,3 +129,38 @@ def test_real_frame_leading_edge():
     cols, rows, resp = leading_edge(pre, det, n_beams=512)
     assert len(cols) > 100                            # dense coverage
     assert len(cols) == len(set(cols.tolist()))       # single bin per beam
+
+
+# ---------------------------------------------------------------- strict gates
+def test_strict_rejects_weak_and_dark():
+    """Strict selection drops low-response keypoints and dark-echo cells."""
+    from sonar_mapping.leading_edge_core import strict_leading_edge, make_detector
+    det = make_detector()
+    rng_ = np.random.default_rng(0)
+    img = (rng_.random((433, 512)) * 40).astype(np.float32) / 255.0   # dark noise
+    raw = (img * 255).astype(np.uint8)
+    cols, rows = strict_leading_edge(img, raw, det, 512,
+                                     min_response=0.0013, min_intensity=40)
+    assert len(cols) == 0        # nothing should survive on dark noise
+
+
+def test_median_consistency_drops_spikes():
+    from sonar_mapping.leading_edge_core import median_consistency
+    rows = np.full(40, 100)
+    rows[17] = 300               # isolated range spike
+    keep = median_consistency(np.arange(40), rows, window=15, tol_bins=30)
+    assert not keep[17]
+    assert keep.sum() == 39
+
+
+def test_strict_scan_to_map_shape():
+    from sonar_mapping.leading_edge_core import scan_to_map_points_strict, make_detector
+    det = make_detector()
+    rng_ = np.random.default_rng(1)
+    img = rng_.random((433, 512)).astype(np.float32)
+    raw = (img * 255).astype(np.uint8)
+    az = np.linspace(-1.13, 1.13, 512).astype(np.float32)
+    ranges = np.linspace(0.1, 10.0, 633).astype(np.float32)
+    pts = scan_to_map_points_strict(img, raw, det, az, ranges, 200,
+                                    np.deg2rad(20.0), 1.0, 2.0, 0.3)
+    assert pts.shape[1] == 4 or len(pts) == 0

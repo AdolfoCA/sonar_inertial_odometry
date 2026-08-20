@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>sonar_mapping</name>
+  <version>0.1.0</version>
+  <description>AKAZE leading-edge seabed mapping: per-beam strongest AKAZE keypoint per sonar scan, projected through the sonar->body mounting transform and the sonar-inertial odometry pose into an accumulated map-frame point cloud (first step from sonar odometry towards sonar SLAM).</description>
+
+  <maintainer email="adaca@dtu.dk">Adolfo Damiano Cafaro</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>marine_acoustic_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>sonar_odometry</depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
